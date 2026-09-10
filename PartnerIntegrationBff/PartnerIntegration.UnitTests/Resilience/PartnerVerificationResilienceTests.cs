@@ -2,6 +2,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Moq.Protected;
+using PartnerIntegrationBff.Business;
+using PartnerIntegrationBff.Interfact;
+using Polly;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -15,64 +18,146 @@ namespace PartnerIntegration.UnitTests.Resilience
     public class PartnerVerificationResilienceTests
     {
         [Fact]
-        public async Task VerifyPartner_WhenFirstTwoAttemptsThrowTimeout_AndThirdSucceeds_ShouldRetryAndReturnTrue()
+        public async Task VerifyPartnerAsync_CallApiSuccess()
         {
-            //// Arrange: Giả lập 2 lần đầu ném TimeoutException (30% case), lần 3 trả về 200 OK
-            //var handlerMock = new Mock<HttpMessageHandler>(MockBehavior.Strict);
-            //var callCount = 0;
+            // Arrange
+            var handlerMock = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+            handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"partnerId\":\"P-1001\",\"isValid\":true}")
+            });
 
-            //handlerMock
-            //    .Protected()
-            //    .Setup<Task<HttpResponseMessage>>(
-            //        "SendAsync",
-            //        ItExpr.IsAny<HttpRequestMessage>(),
-            //        ItExpr.IsAny<CancellationToken>())
-            //    .Returns(() =>
-            //    {
-            //        callCount++;
-            //        if (callCount < 3)
-            //        {
-            //            throw new TimeoutException("Simulated mock timeout exception.");
-            //        }
+            var httpClient = new HttpClient(handlerMock.Object)
+            {
+                BaseAddress = new Uri("http://localhost:5000")
+            };
 
-            //        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-            //        {
-            //            Content = new StringContent("{\"isValid\": true}")
-            //        });
-            //    });
+            var client = new PartnerVerificationClient(httpClient);
 
-            //// Cấu hình Pipeline Resilience có retry 3 lần
-            //var services = new ServiceCollection();
-            //services.AddHttpClient<IPartnerVerificationClient, PartnerVerificationClient>(client =>
-            //{
-            //    client.BaseAddress = new Uri("http://localhost:5000");
-            //})
-            //.ConfigurePrimaryHttpMessageHandler(() => handlerMock.Object)
-            //.AddResilienceHandler("test-retry-pipeline", builder =>
-            //{
-            //    builder.AddRetry(new HttpRetryStrategyOptions
-            //    {
-            //        MaxRetryAttempts = 3,
-            //        Delay = TimeSpan.FromMilliseconds(20), // Tăng tốc độ khi chạy unit test
-            //        BackoffType = DelayBackoffType.Constant,
-            //        ShouldHandle = args =>
-            //        {
-            //            var isTimeout = args.Outcome.Exception is TimeoutException;
-            //            var isServerError = args.Outcome.Result?.StatusCode >= HttpStatusCode.InternalServerError;
-            //            return ValueTask.FromResult(isTimeout || isServerError);
-            //        }
-            //    });
-            //});
+            // Act
+            var result = await client.VerifyPartnerAsync("P-1001");
 
-            //var provider = services.BuildServiceProvider();
-            //var client = provider.GetRequiredService<IPartnerVerificationClient>();
+            // Assert
+            result.Should().BeTrue();
+        }
 
-            //// Act
-            //var result = await client.VerifyPartnerAsync("P-1001");
+        [Fact]
+        public async Task VerifyPartnerAsync_CallApiFail()
+        {
+            // Arrange
+            var handlerMock = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+            handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.InternalServerError));
+            var httpClient = new HttpClient(handlerMock.Object)
+            {
+                BaseAddress = new Uri("http://localhost:5000")
+            };
+            var client = new PartnerVerificationClient(httpClient);
+            // Act
+            var result = await client.VerifyPartnerAsync("P-1001");
+            // Assert
+            result.Should().BeFalse();
+        }
 
-            //// Assert
-            //result.Should().BeTrue();
-            //callCount.Should().Be(3); // Đảm bảo retry đã chạy đúng 3 lần (2 fail + 1 success)
+        [Fact]
+        public async Task VerifyPartnerAsync_CallFailforOneAndTwo_WhenCallThirdSuccess()
+        {
+            var handlerMock = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+            var callCount = 0;
+
+            handlerMock.Protected().Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Returns(() =>
+            {
+                callCount++;
+                if (callCount < 3)
+                {
+                    return Task.FromException<HttpResponseMessage>(new HttpRequestException("Server TimeOut", new TimeoutException("Server TimeOut"), System.Net.HttpStatusCode.GatewayTimeout));
+                }
+                else
+                {
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("{\"partnerId\":\"P-1001\",\"isValid\":true}")
+                    });
+                }
+            });
+
+            // Registry the HttpClient with Polly retry policy
+            var services = new ServiceCollection();
+            services.AddHttpClient<IPartnerVerificationClient, PartnerVerificationClient>(client =>
+            {
+                client.BaseAddress = new Uri("http://localhost:5000");
+            }).ConfigurePrimaryHttpMessageHandler(() => handlerMock.Object)
+            .AddStandardResilienceHandler(options =>
+            {
+                options.Retry.MaxRetryAttempts = 3;
+                options.Retry.Delay = TimeSpan.FromMilliseconds(10);
+                options.Retry.BackoffType = DelayBackoffType.Constant;
+                options.Retry.UseJitter = true;
+
+                options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(2);
+            });
+
+            var serviceProvider = services.BuildServiceProvider();
+            var client = serviceProvider.GetRequiredService<IPartnerVerificationClient>();
+
+            // Act
+            var result = await client.VerifyPartnerAsync("P-1001");
+
+            // Assert
+            result.Should().BeTrue();
+            callCount.Should().Be(3); // 2 lần fail + 1 lần retry thành công
+        }
+
+        [Fact]
+        public async Task VerifyPartnerAsync_CallFailforAllAttempts()
+        {
+            var handlerMock = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+            var callCount = 0;
+            handlerMock.Protected().Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Returns(() =>
+            {
+                callCount++;
+                return Task.FromException<HttpResponseMessage>(new HttpRequestException("Server TimeOut", new TimeoutException("Server TimeOut"), System.Net.HttpStatusCode.GatewayTimeout));
+            });
+            // Registry the HttpClient with Polly retry policy
+            var services = new ServiceCollection();
+            services.AddHttpClient<IPartnerVerificationClient, PartnerVerificationClient>(client =>
+            {
+                client.BaseAddress = new Uri("http://localhost:5000");
+            }).ConfigurePrimaryHttpMessageHandler(() => handlerMock.Object)
+            .AddStandardResilienceHandler(options =>
+            {
+                options.Retry.MaxRetryAttempts = 3;
+                options.Retry.Delay = TimeSpan.FromMilliseconds(10);
+                options.Retry.BackoffType = DelayBackoffType.Constant;
+                options.Retry.UseJitter = true;
+                options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(2);
+            });
+            var serviceProvider = services.BuildServiceProvider();
+            var client = serviceProvider.GetRequiredService<IPartnerVerificationClient>();
+            // Act
+            var result = await client.VerifyPartnerAsync("P-1001");
+            // Assert
+            result.Should().BeFalse();
+            callCount.Should().Be(4); // 3  fail + 1 retry final
         }
     }
 }
