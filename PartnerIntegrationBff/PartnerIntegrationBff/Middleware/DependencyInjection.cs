@@ -3,8 +3,9 @@ using FluentValidation;
 using PartnerIntegrationBff.Interfact;
 using PartnerIntegrationBff.Business;
 using Polly;
+using PartnerIntegrationBff.Services;
 
-namespace PartnerIntegrationBff.Exceptions
+namespace PartnerIntegrationBff.Middleware
 {
     public static class DependencyInjection
     {
@@ -28,6 +29,11 @@ namespace PartnerIntegrationBff.Exceptions
 
                   options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(2);
               });
+
+            services.AddSingleton<IMessageProducer, RabbitMqMessageProducer>();
+
+            services.AddExceptionHandler<GlobalExceptionHandler>();
+            services.AddProblemDetails();
 
             return services;
         }
