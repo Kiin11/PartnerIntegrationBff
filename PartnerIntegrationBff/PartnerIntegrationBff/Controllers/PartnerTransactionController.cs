@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using PartnerIntegrationBff.Constant;
 using PartnerIntegrationBff.Interfact;
+using PartnerIntegrationBff.Models;
 using PartnerIntegrationBff.Models.Request;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -18,17 +19,33 @@ namespace PartnerIntegrationBff.Controllers
     {
         private readonly IValidator<PartnerTransactionRequest> _validator;
         private readonly IPartnerVerificationClient _partnerClient;
+        private readonly IMessageProducer _messageProducer;
+        private readonly IConfiguration _configuration;
 
         public PartnerTransactionController(IValidator<PartnerTransactionRequest> validator,
-            IPartnerVerificationClient partnerVerificationClient)
+            IPartnerVerificationClient partnerVerificationClient,
+            IConfiguration configuration,
+            IMessageProducer messageProducer)
         {
             _validator = validator;
             _partnerClient = partnerVerificationClient;
+            _configuration = configuration;
+            _messageProducer = messageProducer;
         }
 
         [HttpPost]
         public async Task<IActionResult> PostTransaction([FromBody] PartnerTransactionRequest request)
         {
+            if (request == null)
+            {
+                return BadRequest(new ProblemDetails()
+                {
+                    Status = StatusCodes.Status400BadRequest,
+                    Title = "Invalid payload",
+                    Detail = "Request body cannot be null."
+                });
+            }
+
             // Add Validate request body
             var validdationResult = await _validator.ValidateAsync(request);
 
@@ -44,7 +61,7 @@ namespace PartnerIntegrationBff.Controllers
                 });
             }
 
-            // Verification API - Resilience Retry 
+            // Partner Verify : Verification API - Resilience Retry 
             var isVerified = await _partnerClient.VerifyPartnerAsync(request.PartnerId);
 
             if (!isVerified)
@@ -57,16 +74,20 @@ namespace PartnerIntegrationBff.Controllers
                 });
             }
 
-            if (request == null)
+            var queueName = _configuration["RabbitMQ:TransactionsQueue"] ?? "partner_transactions_queue";
+            var enrichedMessage = new TransactionEnrichedMessage()
             {
-                return BadRequest(new ProblemDetails()
-                {
-                    Status = StatusCodes.Status400BadRequest,
-                    Title = "Invalid payload",
-                    Detail = "Request body cannot be null."
-                });
-            }
-           
+                PartnerId = request.PartnerId,
+                TransactionReference = request.TransactionReference,
+                Amount = request.Amount,
+                Currency = request.Currency,
+                Timestamp = request.Timestamp,
+                IngestedAt = DateTime.UtcNow,
+                Status = "QUEUED"
+            };
+
+            await _messageProducer.PublishMessageAsync(queueName, enrichedMessage);
+
             return Accepted(new
             {
                 Message = "Transaction accepted for processing",
