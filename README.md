@@ -29,6 +29,7 @@ PartnerIntegrationBff/
 
 ## 2. Prerequisites
 .NET 8.0 SDK
+
 Docker
 
 ## 3. How to Run the Project
