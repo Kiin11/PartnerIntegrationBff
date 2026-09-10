@@ -1,12 +1,11 @@
 # Partner Integration BFF (.NET 8)
 
-A production-ready **Backend-For-Frontend (BFF)** microservice built with **.NET 8** to handle partner transaction ingestion, external verification with resilience/retry handling, and asynchronous message queue dispatching.
-
+Một microservice **Backend-For-Frontend (BFF)** sẵn sàng cho môi trường sản xuất, được xây dựng bằng **.NET 8** để xử lý việc tiếp nhận giao dịch từ đối tác, xác minh bên ngoài với khả năng phục hồi/thử lại và điều phối hàng đợi tin nhắn bất đồng bộ.
 ---
 
 ## 1. Architectural Decisions & Design Principles
 
-The project adopts **Clean Architecture** principles and separation of concerns to ensure loose coupling, testability, and maintainability:
+Dự án áp dụng các nguyên tắc **Clean Architecture** và sự phân tách các mối quan tâm để đảm bảo tính liên kết lỏng lẻo, khả năng kiểm thử và khả năng bảo trì.
 
 ```text
 PartnerIntegrationBff/
